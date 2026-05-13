@@ -2,7 +2,7 @@
 
 ## Incident
 
-Since this morning, **`POST /api/v1/files`** has been returning **`500`** while **`GET /api/v1/files/...`** (downloads) still works for objects that already exist. The platform team shipped a Terraform refactor yesterday that touched **IAM policies** attached to the EC2 instance profile. The API pods are not crashing, so dashboards look fine, but **every upload fails** with `AccessDenied`. The service is running on the lab host—reproduce it, find what is broken, and fix it with IaC.
+Since this morning, **`POST /api/v1/files`** has been returning **`500`** while **`GET /api/v1/files/...`** (downloads) still works for objects that already exist. The platform team shipped a Terraform refactor yesterday that touched **IAM policies** attached to the EC2 instance profile. The API pods are not crashing, so dashboards look fine, but every upload fails. The service is running on the lab host—reproduce it, find what is broken, and fix it with IaC.
 
 ## Access
 
@@ -47,6 +47,7 @@ All lab workloads run in the **`lab-python-s3-iam-misconfigured-k3s`** namespace
 | `api`      | Deployment  | FastAPI API (includes `POST /api/v1/files` uploads) |
 | `postgres` | Deployment  | Database |
 | `redis`    | Deployment  | Cache |
+| `load-gen` | Deployment  | Scripted transfers + S3 traffic; **`kubectl logs`** here lines up with manual **`GET` / `POST`** below |
 
 Quick checks:
 
@@ -58,19 +59,33 @@ kubectl get pods -n lab-python-s3-iam-misconfigured-k3s
 
 `terraform`, `aws` (CLI), `kubectl`, `curl` — plus normal Linux tooling on the host (`nc`, `dig`, `psql`, etc.).
 
-## Health endpoints
+## Endpoints
 
-The API is exposed on the host (port-forward to the `api` Deployment):
+The API is on port **30800** on the lab host. All examples use `localhost:30800`; you can also `kubectl port-forward` the `api` Deployment to `localhost:8000` if you prefer.
+
+
 
 ```bash
-curl -sS -o /dev/null -w 'health %{http_code}\n' http://localhost:8000/health
-curl -sS -o /dev/null -w 'ready  %{http_code}\n'  http://localhost:8000/ready
+# health check for postgres and redis
+curl -sS -o /dev/null -w 'health  %{http_code}\n' http://localhost:30800/health
+```
+```bash
+# get files from s3
+curl -sS -o /dev/null -w 's3-get  %{http_code}\n' http://localhost:30800/api/v1/files/seed/lab-readme.txt
+```
+```bash
+# post files to s3
+printf 'probe' | curl -sS -o /dev/null -w 's3-post %{http_code}\n' \
+  -X POST "http://localhost:30800/api/v1/files" \
+  -F "file=@-;filename=probe.txt;type=text/plain"
 ```
 
-- **`/health`** — liveness-style check; exercises **PostgreSQL** and **Redis** (returns **`200`** with `"status": "ok"` when both are up).
-- **`/ready`** — this repository does not ship a separate **`GET /ready`** route; Kubernetes readiness in `deploy/k8s/api-deployment.yaml` uses **`/health`**. Treat a successful **`POST /api/v1/files`** (**`201`**) as proof the **S3 write path** is healthy.
+- **`/health`** - liveness check; returns `200` with `"status": "ok"` when PostgreSQL and Redis are up.
+- **`GET /api/v1/files/...`** - S3 read path, works fine.
+- **`POST /api/v1/files`** - S3 write path, broken due to the IAM regression. A `201` here means the fix is complete.
+
+
 
 ## Done when
 
-You can explain **root cause**, show the **IaC change**, and demonstrate **`/health`** returns **`200`**, **`POST /api/v1/files`** returns **`201`** with a body containing `key` / `bucket`, **`GET /api/v1/files/{key}`** returns **`200`** for that key, and the **S3 upload path** behaves as expected.
-
+You can explain the **root cause**, show the **IaC change**, and demonstrate **`/health` returns `200`**, **`GET /api/v1/files/{key}`** returns `200` and **`POST /api/v1/files` returns `201`**.
